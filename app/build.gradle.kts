@@ -16,6 +16,20 @@ android {
         versionName = "0.1.0"
     }
 
+    // Fixed debug key so every build has the same signature (installs update in place).
+    // CI decodes app/debug.keystore.b64 into app/debug.keystore before building.
+    signingConfigs {
+        getByName("debug") {
+            val keystore = file("debug.keystore")
+            if (keystore.exists()) {
+                storeFile = keystore
+                storePassword = "android"
+                keyAlias = "androiddebugkey"
+                keyPassword = "android"
+            }
+        }
+    }
+
     buildTypes {
         debug {
             isMinifyEnabled = false
