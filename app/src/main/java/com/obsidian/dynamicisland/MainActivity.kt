@@ -9,6 +9,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -27,6 +28,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.weight
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -74,32 +76,36 @@ class MainActivity : ComponentActivity() {
             val status = remember(tick) { readStatus(this) }
             Screen(
                 status = status,
-                onOverlay = {
-                    startActivity(
-                        Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")),
+                onOverlay = { openOverlaySettings() },
+                onListener = {
+                    safelyOpenSettings(
+                        Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS),
+                        "Could not open notification access settings. Open App info and check special app access."
                     )
                 },
-                onListener = { startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) },
                 onNotifications = {
-                    if (Build.VERSION.SDK_INT >= 33) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
-                },
-                onBattery = {
-                    runCatching {
-                        startActivity(
-                            Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")),
-                        )
+                    if (Build.VERSION.SDK_INT >= 33) {
+                        notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
                     }
                 },
-                onAppInfo = {
-                    startActivity(
-                        Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")),
+                onBattery = {
+                    safelyOpenSettings(
+                        Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")),
+                        "Battery optimization settings are not available on this device."
                     )
                 },
+                onAppInfo = { openAppInfo() },
                 onToggle = {
-                    if (status.running) IslandService.stop(this) else IslandService.start(this)
+                    if (IslandService.running) {
+                        stopService(Intent(this, IslandService::class.java))
+                        Prefs.setEnabled(this, false)
+                    } else if (!Settings.canDrawOverlays(this)) {
+                        openOverlaySettings()
+                    } else {
+                        Prefs.setEnabled(this, true)
+                        IslandService.start(this)
+                    }
                     refresh.intValue++
-                    // The service starts asynchronously, so check again shortly after.
-                    window.decorView.postDelayed({ refresh.intValue++ }, 500)
                 },
             )
         }
@@ -109,18 +115,47 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         refresh.intValue++
     }
-}
 
-private fun readStatus(context: Context): Status {
-    val pm = context.getSystemService(PowerManager::class.java)
-    return Status(
-        overlay = Settings.canDrawOverlays(context),
-        listener = NotificationManagerCompat.getEnabledListenerPackages(context).contains(context.packageName),
-        notifications = Build.VERSION.SDK_INT < 33 ||
-            context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED,
-        battery = pm.isIgnoringBatteryOptimizations(context.packageName),
-        running = IslandService.running,
-    )
+    private fun openOverlaySettings() {
+        safelyOpenSettings(
+            Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")),
+            "Could not open overlay permission settings. Open App info and enable Display over other apps."
+        )
+    }
+
+    private fun safelyOpenSettings(intent: Intent, error: String) {
+        try {
+            if (intent.resolveActivity(packageManager) != null) startActivity(intent)
+            else Toast.makeText(this, error, Toast.LENGTH_LONG).show()
+        } catch (_: Exception) {
+            Toast.makeText(this, error, Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun openAppInfo() {
+        safelyOpenSettings(
+            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")),
+            "Could not open app info."
+        )
+    }
+
+    @Suppress("DEPRECATION")
+    private fun readStatus(context: Context): Status {
+        val pm = context.getSystemService(PowerManager::class.java)
+        val enabledListeners = Settings.Secure.getString(
+            context.contentResolver, "enabled_notification_listeners"
+        ).orEmpty()
+        val listenerEnabled = enabledListeners.contains(context.packageName)
+        val notificationsEnabled = Build.VERSION.SDK_INT < 33 ||
+            context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+        return Status(
+            overlay = Settings.canDrawOverlays(context),
+            listener = listenerEnabled,
+            notifications = notificationsEnabled,
+            battery = pm.isIgnoringBatteryOptimizations(context.packageName),
+            running = IslandService.running,
+        )
+    }
 }
 
 @Composable
@@ -133,98 +168,81 @@ private fun Screen(
     onAppInfo: () -> Unit,
     onToggle: () -> Unit,
 ) {
-    val ready = status.overlay && status.listener
     Column(
-        Modifier
-            .fillMaxSize()
-            .background(Bg)
-            .systemBarsPadding()
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 22.dp, vertical = 28.dp),
+        Modifier.fillMaxSize().background(Bg).systemBarsPadding()
+            .verticalScroll(rememberScrollState()).padding(horizontal = 22.dp, vertical = 24.dp),
     ) {
+        BasicText("DYNAMIC ISLAND", style = TextStyle(color = Accent, fontSize = 12.sp, fontWeight = FontWeight.Bold))
+        Spacer(Modifier.height(10.dp))
+        BasicText("Make your phone feel alive.", style = TextStyle(color = TextPrimary, fontSize = 28.sp, fontWeight = FontWeight.Bold))
+        Spacer(Modifier.height(8.dp))
         BasicText(
-            "Dynamic Island",
-            style = TextStyle(color = TextPrimary, fontSize = 30.sp, fontWeight = FontWeight.Bold),
+            "A compact now-playing island that expands into media controls.",
+            style = TextStyle(color = TextMuted, fontSize = 14.sp),
         )
-        Spacer(Modifier.height(6.dp))
-        BasicText(
-            "What's playing, at your camera cutout.",
-            style = TextStyle(color = TextMuted, fontSize = 15.sp),
-        )
-        Spacer(Modifier.height(28.dp))
-
-        StepCard("Display over other apps", "Lets the island draw above every app.", status.overlay, "Allow", onOverlay)
-        Spacer(Modifier.height(12.dp))
-        StepCard("Notification access", "Lets the island read what's playing and control it.", status.listener, "Allow", onListener)
-        Spacer(Modifier.height(12.dp))
-        StepCard("Notifications", "Shows the small \"running\" notification Android requires.", status.notifications, "Allow", onNotifications)
-        Spacer(Modifier.height(12.dp))
-        StepCard("Keep running in background", "Stops battery saver from closing the island.", status.battery, "Exempt", onBattery)
-        Spacer(Modifier.height(12.dp))
-        StepCard("Auto-start (iQOO / Funtouch OS)", "In App info, open Battery or Autostart and allow background activity.", false, "App info", onAppInfo)
-
-        Spacer(Modifier.height(28.dp))
+        Spacer(Modifier.height(26.dp))
         Box(
-            Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(28.dp))
-                .background(if (status.running) Surface else if (ready) Accent else Surface)
-                .clickable(enabled = ready || status.running, onClick = onToggle)
-                .padding(vertical = 18.dp),
-            contentAlignment = Alignment.Center,
+            Modifier.fillMaxWidth().clip(RoundedCornerShape(22.dp)).background(Surface).padding(18.dp),
         ) {
-            BasicText(
-                if (status.running) "Stop island" else "Start island",
-                style = TextStyle(
-                    color = if (status.running) TextPrimary else if (ready) Color.Black else TextMuted,
-                    fontSize = 17.sp,
-                    fontWeight = FontWeight.SemiBold,
-                ),
-            )
+            Column {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        BasicText("Island service", style = TextStyle(color = TextPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold))
+                        BasicText(if (status.running) "Currently active" else "Currently stopped", style = TextStyle(color = TextMuted, fontSize = 13.sp))
+                    }
+                    Box(
+                        Modifier.size(12.dp).clip(CircleShape)
+                            .background(if (status.running) Color(0xFF62D69A) else TextMuted)
+                    )
+                }
+                Spacer(Modifier.height(18.dp))
+                Box(
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
+                        .background(Accent).clickable(onClick = onToggle).padding(vertical = 15.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    BasicText(
+                        if (status.running) "Stop Dynamic Island" else "Start Dynamic Island",
+                        style = TextStyle(color = Color(0xFF08090B), fontSize = 15.sp, fontWeight = FontWeight.Bold),
+                    )
+                }
+            }
         }
-        if (!ready && !status.running) {
-            Spacer(Modifier.height(10.dp))
-            BasicText(
-                "Allow display over other apps and notification access to start.",
-                style = TextStyle(color = TextMuted, fontSize = 13.sp),
-            )
+        Spacer(Modifier.height(26.dp))
+        BasicText("REQUIRED ACCESS", style = TextStyle(color = TextMuted, fontSize = 12.sp, fontWeight = FontWeight.Bold))
+        Spacer(Modifier.height(10.dp))
+        AccessRow("Display over other apps", "Allows the island to appear above other apps", status.overlay, onOverlay)
+        AccessRow("Notification access", "Reads active media sessions and playback metadata", status.listener, onListener)
+        AccessRow("Notifications", "Shows the persistent service notification", status.notifications, onNotifications)
+        AccessRow("Battery optimization", "Helps keep playback controls available", status.battery, onBattery)
+        Spacer(Modifier.height(22.dp))
+        Box(
+            Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Surface)
+                .clickable(onClick = onAppInfo).padding(16.dp)
+        ) {
+            BasicText("Open app info and special app access", style = TextStyle(color = TextPrimary, fontSize = 14.sp))
         }
+        Spacer(Modifier.height(28.dp))
+        BasicText("Enable overlay and notification access for the full experience.", style = TextStyle(color = TextMuted, fontSize = 12.sp))
     }
 }
 
 @Composable
-private fun StepCard(title: String, body: String, done: Boolean, action: String, onClick: () -> Unit) {
+private fun AccessRow(title: String, description: String, granted: Boolean, onClick: () -> Unit) {
     Row(
-        Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(20.dp))
-            .background(Surface)
-            .padding(16.dp),
+        Modifier.fillMaxWidth().padding(vertical = 6.dp).clip(RoundedCornerShape(16.dp))
+            .background(Surface).clickable(onClick = onClick).padding(15.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(
-            Modifier
-                .size(12.dp)
-                .clip(CircleShape)
-                .background(if (done) Accent else Color(0xFF3A3E47)),
-        )
-        Spacer(Modifier.width(14.dp))
         Column(Modifier.weight(1f)) {
-            BasicText(title, style = TextStyle(color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.Medium))
-            Spacer(Modifier.height(3.dp))
-            BasicText(body, style = TextStyle(color = TextMuted, fontSize = 13.sp))
+            BasicText(title, style = TextStyle(color = TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold))
+            Spacer(Modifier.height(4.dp))
+            BasicText(description, style = TextStyle(color = TextMuted, fontSize = 12.sp))
         }
-        Spacer(Modifier.width(12.dp))
-        if (!done) {
-            Box(
-                Modifier
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(Color(0xFF23262D))
-                    .clickable(onClick = onClick)
-                    .padding(horizontal = 14.dp, vertical = 9.dp),
-            ) {
-                BasicText(action, style = TextStyle(color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium))
-            }
-        }
+        Spacer(Modifier.width(10.dp))
+        BasicText(
+            if (granted) "Granted" else "Set up",
+            style = TextStyle(color = if (granted) Color(0xFF62D69A) else Accent, fontSize = 12.sp, fontWeight = FontWeight.Bold),
+        )
     }
 }
