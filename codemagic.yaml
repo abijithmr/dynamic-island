@@ -16,7 +16,7 @@ workflows:
       - name: Set Android SDK location
         script: echo "sdk.dir=$ANDROID_SDK_ROOT" > "$CM_BUILD_DIR/local.properties"
       - name: Restore fixed debug keystore
-        script: base64 -d app/debug.keystore.b64 > app/debug.keystore
+        script: base64 -d < app/debug.keystore.b64 > app/debug.keystore
       - name: Build debug APK
         script: |
           chmod +x ./gradlew
