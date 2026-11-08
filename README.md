@@ -1,27 +1,35 @@
 # Dynamic Island
 
-A native Android "dynamic island" for the camera cutout. Phase 1 scope: the music that is currently playing.
+A native Android "dynamic island" for the camera cutout.
 
 - Kotlin + Jetpack Compose, `minSdk 30` (Android 11+)
 - Package: `com.obsidian.dynamicisland`
-- Reads any media app (Spotify, YouTube Music, local players) through `MediaSessionManager`
 
-## How it works
+## What it does
+
+| State | What you see |
+|---|---|
+| Idle | A plain black pill hugging the camera cutout |
+| Music playing | Compact pill: album art left, equalizer right |
+| Tap while music plays | Player: art, title, artist, seek bar, previous / play-pause / next |
+| Tap with nothing playing | Panel with your most-used apps. Tap one to open it |
+
+Long-press the compact pill to open the music app. The island collapses after a few seconds, or when you tap outside it.
+
+## Why an accessibility service
+
+Android draws normal app overlays **below** the status bar, so taps at the cutout go to the status bar instead of the island. An accessibility overlay window sits above the status bar and receives those touches. The service only hosts the window. It does not read the screen (`canRetrieveWindowContent="false"`). It also stays alive on its own, so no foreground service or boot receiver is needed.
+
+## Architecture
 
 | Piece | Implementation |
 |---|---|
-| Overlay window | `IslandService` adds a `ComposeView` with `TYPE_APPLICATION_OVERLAY`, wrapped to content so touches outside the pill reach the app underneath |
-| Now playing | `MediaRepository` watches active sessions (needs Notification Access via `MediaListenerService`) |
-| Controls | `MediaController.transportControls` (play/pause, previous, next, seek) |
-| Animation | Spring morph of width, height and corner radius, content cross-fade, equalizer, accent color from album art (Palette) |
-| Position | Centered on the display cutout reported by `DisplayCutout.boundingRectTop` |
-| Keep-alive | Foreground service, battery-exemption prompt, boot receiver |
-
-## States
-
-- **Idle:** hidden (no media, or paused for more than 15 s)
-- **Compact:** album art left, equalizer right. Tap to expand, long-press to open the media app
-- **Expanded:** art, title, artist, seek bar, previous / play-pause / next. Collapses after 6 s, or when you tap outside
+| Overlay window | `IslandOverlay` adds a `ComposeView` as `TYPE_ACCESSIBILITY_OVERLAY`, hardware accelerated |
+| Smooth animation | The window only resizes at the collapsed / expanded endpoints. Everything between them is animated inside Compose (one spring for width, height and radius, read in layout and draw so no recomposition per frame) |
+| Now playing | `MediaRepository` watches active sessions (needs Notification access via `MediaListenerService`) |
+| Progress bar | Driven per frame with `withFrameNanos`, drawn in the draw phase only |
+| Frequent apps | `FrequentApps` ranks apps by foreground time over 7 days (needs Usage access) |
+| Position | Centered on `DisplayCutout.boundingRectTop` |
 
 ## Build
 
@@ -29,21 +37,19 @@ A native Android "dynamic island" for the camera cutout. Phase 1 scope: the musi
 ./gradlew assembleDebug
 ```
 
-APK: `app/build/outputs/apk/debug/app-debug.apk`. Codemagic builds the same on every push to `main` (`codemagic.yaml`).
+Codemagic builds this on every push to `main` (`codemagic.yaml`).
 
 ## First run
 
-1. Allow **Display over other apps**
-2. Allow **Notification access** for Dynamic Island
-3. Tap **Start island**, then play something
-
-On iQOO / Funtouch OS also allow auto-start and unrestricted battery use in App info.
+1. Accessibility: turn on **Dynamic Island** (on Android 13+ first use App info, three dots, **Allow restricted settings**)
+2. Notification access: allow it
+3. Optional: Usage access (frequent apps), Display over other apps (opening apps from the island)
+4. On iQOO: App info, Battery **Unrestricted**, and allow pop-ups while running in the background
 
 ## Roadmap
 
-- [x] Permissions onboarding
-- [x] Compact and expanded views with controls and seek
-- [x] Spring animations, equalizer, accent color
-- [ ] Fullscreen / game detection (Accessibility Service)
-- [ ] Settings (position offset, size, auto-collapse time)
+- [x] Compact, player and frequent-apps states
+- [x] Spring morph, equalizer, accent color from album art, haptic and press feedback
+- [ ] Fullscreen / game hiding
+- [ ] Settings (position offset, size, collapse time, pinned apps)
 - [ ] Auto-expand on track change

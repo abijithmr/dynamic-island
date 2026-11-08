@@ -2,8 +2,11 @@ package com.obsidian.dynamicisland.ui
 
 import android.graphics.Bitmap
 import android.os.SystemClock
+import android.view.HapticFeedbackConstants
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.SpringSpec
+import androidx.compose.animation.core.Transition
 import androidx.compose.animation.core.animateDp
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
@@ -25,6 +28,7 @@ import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -36,6 +40,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
@@ -44,122 +50,193 @@ import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.layout
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.palette.graphics.Palette
+import com.obsidian.dynamicisland.AppEntry
+import com.obsidian.dynamicisland.AppsUi
+import com.obsidian.dynamicisland.IslandActions
 import com.obsidian.dynamicisland.IslandGeometry
+import com.obsidian.dynamicisland.IslandSpec
 import com.obsidian.dynamicisland.NowPlaying
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
 private val DefaultAccent = Color(0xFF8FB4FF)
-private val ExpandedW = 360.dp
-private val ExpandedH = 190.dp
 
-/** Entry point of the overlay. Renders nothing when no media session is active. */
+private enum class Mode { Idle, Music, MusicOpen, AppsOpen }
+
+/** One spring for every size change, so width, height and radius move as a single gesture. */
+private fun <T> morph(): SpringSpec<T> = spring(dampingRatio = 0.78f, stiffness = 420f)
+
+/**
+ * Entry point of the overlay.
+ *
+ * - Idle: a plain black pill hugging the camera cutout
+ * - Music: compact pill with art and equalizer; tap to open the player
+ * - Nothing playing + tap: panel with your most-used apps
+ */
 @Composable
 fun IslandRoot(
     np: NowPlaying?,
     geo: IslandGeometry,
     expanded: Boolean,
-    setExpanded: (Boolean) -> Unit,
+    apps: AppsUi,
+    actions: IslandActions,
 ) {
-    var pausedTooLong by remember { mutableStateOf(false) }
+    // Keep the last track around so the player can fade out instead of vanishing.
+    var last by remember { mutableStateOf(np) }
+    LaunchedEffect(np) { if (np != null) last = np }
+    val shown = np ?: last
+
+    val mode = when {
+        expanded && np != null -> Mode.MusicOpen
+        expanded -> Mode.AppsOpen
+        np != null -> Mode.Music
+        else -> Mode.Idle
+    }
+
     var interaction by remember { mutableIntStateOf(0) }
-
-    // Hide the island after 15 s of pause, and bring it back the moment playback resumes.
-    LaunchedEffect(np?.isPlaying, np?.title) {
-        pausedTooLong = false
-        if (np != null && !np.isPlaying) {
-            delay(15_000)
-            pausedTooLong = true
-            setExpanded(false)
-        }
-    }
-    LaunchedEffect(np == null) { if (np == null) setExpanded(false) }
-    // Auto-collapse six seconds after the last touch.
-    LaunchedEffect(expanded, interaction) {
+    LaunchedEffect(expanded, interaction, np == null) {
         if (expanded) {
-            delay(6_000)
-            setExpanded(false)
+            delay(if (np != null) 6_000L else 9_000L)
+            actions.collapse()
         }
     }
 
-    if (np != null && !pausedTooLong) {
-        IslandBody(np, geo, expanded, setExpanded) { interaction++ }
-    }
-}
+    val accent = rememberAccent(shown?.art)
+    val view = LocalView.current
+    val t = updateTransition(mode, label = "island")
 
-@Composable
-private fun IslandBody(
-    np: NowPlaying,
-    geo: IslandGeometry,
-    expanded: Boolean,
-    setExpanded: (Boolean) -> Unit,
-    bump: () -> Unit,
-) {
-    val accent = rememberAccent(np.art)
-    val t = updateTransition(expanded, label = "island")
+    // Animated values are read in layout/draw only, so a frame of motion never recomposes the tree.
+    val width = t.animateDp({ morph() }, label = "w") { m ->
+        when (m) {
+            Mode.Idle -> geo.idleWidthDp.dp
+            Mode.Music -> geo.compactWidthDp.dp
+            else -> geo.expandedWidthDp.dp
+        }
+    }
+    val height = t.animateDp({ morph() }, label = "h") { m ->
+        when (m) {
+            Mode.Idle, Mode.Music -> geo.compactHeightDp.dp
+            Mode.MusicOpen -> IslandSpec.MUSIC_H_DP.dp
+            Mode.AppsOpen -> IslandSpec.APPS_H_DP.dp
+        }
+    }
+    val radius = t.animateDp({ morph() }, label = "r") { m ->
+        when (m) {
+            Mode.Idle, Mode.Music -> (geo.compactHeightDp / 2f).dp
+            else -> 34.dp
+        }
+    }
+    val compactAlpha = t.contentAlpha(Mode.Music)
+    val musicAlpha = t.contentAlpha(Mode.MusicOpen)
+    val appsAlpha = t.contentAlpha(Mode.AppsOpen)
 
-    // Spring-based morph of width, height and corner radius.
-    val width by t.animateDp({ spring(dampingRatio = 0.74f, stiffness = 380f) }, label = "w") {
-        if (it) ExpandedW else geo.compactWidthDp.dp
-    }
-    val height by t.animateDp({ spring(dampingRatio = 0.74f, stiffness = 380f) }, label = "h") {
-        if (it) ExpandedH else geo.compactHeightDp.dp
-    }
-    val radius by t.animateDp({ spring(dampingRatio = 0.8f, stiffness = 380f) }, label = "r") {
-        if (it) 34.dp else (geo.compactHeightDp / 2f).dp
-    }
-    // Content cross-fades instead of snapping.
-    val expandedAlpha by t.animateFloat(
-        { if (targetState) tween(240, delayMillis = 110) else tween(110) },
-        label = "ea",
-    ) { if (it) 1f else 0f }
-    val compactAlpha by t.animateFloat(
-        { if (targetState) tween(110) else tween(220, delayMillis = 120) },
-        label = "ca",
-    ) { if (it) 0f else 1f }
+    var pressed by remember { mutableStateOf(false) }
+    val press = animateFloatAsState(
+        targetValue = if (pressed && !expanded) 0.93f else 1f,
+        animationSpec = spring(dampingRatio = 0.55f, stiffness = 700f),
+        label = "press",
+    )
 
     Box(
         Modifier
-            .size(width, height)
-            .clip(RoundedCornerShape(radius))
-            .background(Color.Black)
-            .pointerInput(expanded) {
+            .fillMaxSize()
+            .pointerInput(expanded, np) {
                 detectTapGestures(
-                    onTap = { if (!expanded) setExpanded(true) },
-                    onLongPress = { if (!expanded) openSource(np) },
+                    onPress = {
+                        pressed = true
+                        tryAwaitRelease()
+                        pressed = false
+                    },
+                    onTap = {
+                        if (!expanded) {
+                            view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
+                            actions.expand()
+                        }
+                    },
+                    onLongPress = { if (!expanded) np?.let { openSource(it) } },
                 )
             },
+        contentAlignment = Alignment.TopCenter,
     ) {
-        if (compactAlpha > 0.001f) {
-            CompactContent(np, accent, geo, Modifier.align(Alignment.TopCenter).graphicsLayer { alpha = compactAlpha })
-        }
-        if (expandedAlpha > 0.001f) {
-            ExpandedContent(np, accent, Modifier.align(Alignment.TopCenter).graphicsLayer { alpha = expandedAlpha }, bump)
+        Box(
+            Modifier
+                .layout { measurable, _ ->
+                    val w = width.value.roundToPx()
+                    val h = height.value.roundToPx()
+                    val placeable = measurable.measure(Constraints.fixed(w, h))
+                    layout(w, h) { placeable.place(0, 0) }
+                }
+                .graphicsLayer {
+                    shape = RoundedCornerShape(radius.value.toPx())
+                    clip = true
+                    scaleX = press.value
+                    scaleY = press.value
+                    transformOrigin = TransformOrigin(0.5f, 0f)
+                }
+                .background(Color.Black),
+        ) {
+            if (shown != null && (mode == Mode.Music || compactAlpha.value > 0.001f)) {
+                CompactContent(
+                    shown, accent, geo,
+                    Modifier.align(Alignment.TopCenter).graphicsLayer { alpha = compactAlpha.value },
+                )
+            }
+            if (shown != null && (mode == Mode.MusicOpen || musicAlpha.value > 0.001f)) {
+                MusicPanel(
+                    shown, accent, geo,
+                    Modifier.align(Alignment.TopCenter).graphicsLayer { alpha = musicAlpha.value },
+                    bump = { interaction++ },
+                    onOpenSource = { openSource(it); actions.collapse() },
+                )
+            }
+            if (mode == Mode.AppsOpen || appsAlpha.value > 0.001f) {
+                AppsPanel(
+                    apps, geo,
+                    Modifier.align(Alignment.TopCenter).graphicsLayer { alpha = appsAlpha.value },
+                    onLaunch = actions.launch,
+                    onGrantUsage = actions.grantUsage,
+                )
+            }
         }
     }
 }
+
+/** Content fades in after the shape has started moving, and out before it shrinks. */
+@Composable
+private fun Transition<Mode>.contentAlpha(show: Mode): State<Float> =
+    animateFloat(
+        transitionSpec = { if (targetState == show) tween(240, delayMillis = 110) else tween(110) },
+        label = "alpha",
+    ) { if (it == show) 1f else 0f }
 
 @Composable
 private fun CompactContent(np: NowPlaying, accent: Color, geo: IslandGeometry, modifier: Modifier) {
@@ -177,11 +254,18 @@ private fun CompactContent(np: NowPlaying, accent: Color, geo: IslandGeometry, m
 }
 
 @Composable
-private fun ExpandedContent(np: NowPlaying, accent: Color, modifier: Modifier, bump: () -> Unit) {
+private fun MusicPanel(
+    np: NowPlaying,
+    accent: Color,
+    geo: IslandGeometry,
+    modifier: Modifier,
+    bump: () -> Unit,
+    onOpenSource: (NowPlaying) -> Unit,
+) {
     val controls = np.controller.transportControls
     Column(
         modifier
-            .requiredSize(ExpandedW, ExpandedH)
+            .requiredSize(geo.expandedWidthDp.dp, IslandSpec.MUSIC_H_DP.dp)
             .padding(start = 20.dp, end = 20.dp, top = 18.dp, bottom = 12.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -190,7 +274,7 @@ private fun ExpandedContent(np: NowPlaying, accent: Color, modifier: Modifier, b
                 Modifier.clickable(
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null,
-                ) { openSource(np) },
+                ) { onOpenSource(np) },
             )
             Spacer(Modifier.width(14.dp))
             Column(Modifier.weight(1f)) {
@@ -243,23 +327,123 @@ private fun ExpandedContent(np: NowPlaying, accent: Color, modifier: Modifier, b
 }
 
 @Composable
+private fun AppsPanel(
+    apps: AppsUi,
+    geo: IslandGeometry,
+    modifier: Modifier,
+    onLaunch: (String) -> Unit,
+    onGrantUsage: () -> Unit,
+) {
+    Column(
+        modifier
+            .requiredSize(geo.expandedWidthDp.dp, IslandSpec.APPS_H_DP.dp)
+            .padding(horizontal = 20.dp, vertical = 16.dp),
+    ) {
+        BasicText(
+            "Frequent apps",
+            style = TextStyle(color = Color.White.copy(alpha = 0.55f), fontSize = 13.sp, fontWeight = FontWeight.Medium),
+        )
+        Spacer(Modifier.height(10.dp))
+        when (apps) {
+            AppsUi.Loading -> Hint("Loading…")
+            AppsUi.NoAccess -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    BasicText(
+                        "Allow usage access to see the apps you use most.",
+                        style = TextStyle(color = Color.White.copy(alpha = 0.7f), fontSize = 14.sp, textAlign = TextAlign.Center),
+                    )
+                    Spacer(Modifier.height(14.dp))
+                    Box(
+                        Modifier
+                            .clip(CircleShape)
+                            .background(Color.White)
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null,
+                                onClick = onGrantUsage,
+                            )
+                            .padding(horizontal = 18.dp, vertical = 10.dp),
+                    ) {
+                        BasicText("Allow", style = TextStyle(color = Color.Black, fontSize = 14.sp, fontWeight = FontWeight.SemiBold))
+                    }
+                }
+            }
+            is AppsUi.Ready ->
+                if (apps.apps.isEmpty()) {
+                    Hint("Use your phone a little and your most-used apps will show up here.")
+                } else {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        apps.apps.chunked(4).forEach { row ->
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                repeat(4) { i ->
+                                    val app = row.getOrNull(i)
+                                    if (app != null) AppTile(app, onLaunch) else Spacer(Modifier.width(72.dp))
+                                }
+                            }
+                        }
+                    }
+                }
+        }
+    }
+}
+
+@Composable
+private fun Hint(text: String) {
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        BasicText(
+            text,
+            style = TextStyle(color = Color.White.copy(alpha = 0.6f), fontSize = 14.sp, textAlign = TextAlign.Center),
+        )
+    }
+}
+
+@Composable
+private fun AppTile(app: AppEntry, onLaunch: (String) -> Unit) {
+    Column(
+        Modifier
+            .width(72.dp)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+            ) { onLaunch(app.packageName) },
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Image(
+            app.icon,
+            app.label,
+            Modifier.size(52.dp).clip(RoundedCornerShape(15.dp)),
+            contentScale = ContentScale.Crop,
+        )
+        Spacer(Modifier.height(4.dp))
+        BasicText(
+            app.label,
+            style = TextStyle(color = Color.White.copy(alpha = 0.85f), fontSize = 11.sp, textAlign = TextAlign.Center),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@Composable
 private fun SeekBar(np: NowPlaying, accent: Color, bump: () -> Unit) {
     val current by rememberUpdatedState(np)
-    var now by remember { mutableLongStateOf(SystemClock.elapsedRealtime()) }
+    var nowMs by remember { mutableLongStateOf(SystemClock.elapsedRealtime()) }
+
+    // One state write per frame while playing. Only the bar's draw lambda reads it, so the
+    // bar glides without recomposing anything.
     LaunchedEffect(np.isPlaying, np.positionMs, np.updateTimeMs) {
-        now = SystemClock.elapsedRealtime()
+        nowMs = SystemClock.elapsedRealtime()
         while (np.isPlaying) {
-            delay(250)
-            now = SystemClock.elapsedRealtime()
+            withFrameNanos { }
+            nowMs = SystemClock.elapsedRealtime()
         }
     }
 
     val duration = np.durationMs
     val seekable = np.canSeek && duration > 0
     var drag by remember { mutableStateOf<Float?>(null) }
-    val position = np.positionAt(now)
-    val fraction = drag ?: if (duration > 0) (position.toFloat() / duration).coerceIn(0f, 1f) else 0f
-    val shownPosition = drag?.let { (it * duration).toLong() } ?: position
+    val seconds by remember { derivedStateOf { current.positionAt(nowMs) / 1000 } }
+    val shownSeconds = drag?.let { (it * duration / 1000).toLong() } ?: seconds
 
     Column {
         Box(
@@ -294,18 +478,21 @@ private fun SeekBar(np: NowPlaying, accent: Color, bump: () -> Unit) {
             contentAlignment = Alignment.Center,
         ) {
             Box(
-                Modifier.fillMaxWidth().height(4.dp).clip(CircleShape)
-                    .background(Color.White.copy(alpha = 0.2f)),
-            )
-            Box(
-                Modifier.align(Alignment.CenterStart)
-                    .fillMaxWidth(fraction).height(4.dp).clip(CircleShape)
-                    .background(accent),
+                Modifier
+                    .fillMaxWidth()
+                    .height(4.dp)
+                    .clip(CircleShape)
+                    .background(Color.White.copy(alpha = 0.2f))
+                    .drawBehind {
+                        val f = drag
+                            ?: if (duration > 0) (current.positionAt(nowMs).toFloat() / duration).coerceIn(0f, 1f) else 0f
+                        drawRect(accent, size = Size(size.width * f, size.height))
+                    },
             )
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             val label = TextStyle(color = Color.White.copy(alpha = 0.5f), fontSize = 11.sp)
-            BasicText(formatTime(shownPosition), style = label)
+            BasicText(formatTime(shownSeconds * 1000), style = label)
             BasicText(if (duration > 0) formatTime(duration) else "--:--", style = label)
         }
     }

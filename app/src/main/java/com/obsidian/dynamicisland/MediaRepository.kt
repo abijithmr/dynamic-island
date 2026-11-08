@@ -61,6 +61,11 @@ class MediaRepository(private val context: Context) {
         }
     }
 
+    fun restart() {
+        stop()
+        start()
+    }
+
     fun stop() {
         runCatching { manager.removeOnActiveSessionsChangedListener(sessionsListener) }
         clearCallbacks()

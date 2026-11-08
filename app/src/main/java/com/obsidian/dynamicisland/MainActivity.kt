@@ -1,22 +1,16 @@
 package com.obsidian.dynamicisland
 
-import android.Manifest
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
-import android.os.PowerManager
 import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -34,7 +28,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -54,18 +47,14 @@ private val TextPrimary = Color(0xFFECEEF2)
 private val TextMuted = Color(0xFF8D93A0)
 
 private data class Status(
-    val overlay: Boolean,
+    val accessibility: Boolean,
     val listener: Boolean,
-    val notifications: Boolean,
-    val battery: Boolean,
-    val running: Boolean,
+    val usage: Boolean,
+    val overlay: Boolean,
 )
 
 class MainActivity : ComponentActivity() {
     private val refresh = mutableIntStateOf(0)
-
-    private val notificationPermission =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { refresh.intValue++ }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -75,56 +64,12 @@ class MainActivity : ComponentActivity() {
             val status = remember(tick) { readStatus(this) }
             Screen(
                 status = status,
-                onOverlay = { openOverlaySettings() },
+                onAccessibility = { open(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) },
                 onListener = { openListenerSettings() },
-                onNotifications = {
-                    if (Build.VERSION.SDK_INT >= 33) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
-                },
-                onBattery = {
-                    runCatching {
-                        startActivity(
-                            Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")),
-                        )
-                    }
-                },
+                onUsage = { open(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)) },
+                onOverlay = { openOverlaySettings() },
                 onAppInfo = { openAppInfo() },
-                onToggle = {
-                    if (status.running) IslandService.stop(this) else IslandService.start(this)
-                    refresh.intValue++
-                    // The service starts asynchronously, so check again shortly after.
-                    window.decorView.postDelayed({ refresh.intValue++ }, 500)
-                },
             )
-        }
-    }
-
-    private fun openAppInfo() {
-        runCatching {
-            startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
-        }
-    }
-
-    /** Tries the app's own overlay page, then the general list, then App info. Never crashes. */
-    private fun openOverlaySettings() {
-        val direct = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
-        val general = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION)
-        if (runCatching { startActivity(direct) }.isFailure &&
-            runCatching { startActivity(general) }.isFailure
-        ) {
-            openAppInfo()
-        }
-    }
-
-    /** Opens this app's own notification-access page (Android 11+), falling back to the full list. */
-    private fun openListenerSettings() {
-        val component = ComponentName(this, MediaListenerService::class.java)
-        val detail = Intent(Settings.ACTION_NOTIFICATION_LISTENER_DETAIL_SETTINGS)
-            .putExtra(Settings.EXTRA_NOTIFICATION_LISTENER_COMPONENT_NAME, component.flattenToString())
-        val list = Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
-        if (runCatching { startActivity(detail) }.isFailure &&
-            runCatching { startActivity(list) }.isFailure
-        ) {
-            openAppInfo()
         }
     }
 
@@ -132,31 +77,57 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         refresh.intValue++
     }
+
+    private fun open(intent: Intent): Boolean = runCatching { startActivity(intent) }.isSuccess
+
+    private fun openAppInfo() {
+        open(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
+    }
+
+    private fun openOverlaySettings() {
+        if (!open(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))) &&
+            !open(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION))
+        ) {
+            openAppInfo()
+        }
+    }
+
+    private fun openListenerSettings() {
+        val component = ComponentName(this, MediaListenerService::class.java)
+        val detail = Intent(Settings.ACTION_NOTIFICATION_LISTENER_DETAIL_SETTINGS)
+            .putExtra(Settings.EXTRA_NOTIFICATION_LISTENER_COMPONENT_NAME, component.flattenToString())
+        if (!open(detail) && !open(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))) openAppInfo()
+    }
 }
 
 private fun readStatus(context: Context): Status {
-    val pm = context.getSystemService(PowerManager::class.java)
+    val enabled = Settings.Secure.getString(
+        context.contentResolver,
+        Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
+    ).orEmpty()
+    val accessibility = enabled.split(':').any {
+        val c = ComponentName.unflattenFromString(it)
+        c != null &&
+            c.packageName == context.packageName &&
+            c.className == IslandAccessibilityService::class.java.name
+    }
     return Status(
-        overlay = Settings.canDrawOverlays(context),
+        accessibility = accessibility,
         listener = NotificationManagerCompat.getEnabledListenerPackages(context).contains(context.packageName),
-        notifications = Build.VERSION.SDK_INT < 33 ||
-            context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED,
-        battery = pm.isIgnoringBatteryOptimizations(context.packageName),
-        running = IslandService.running,
+        usage = UsageAccess.isGranted(context),
+        overlay = Settings.canDrawOverlays(context),
     )
 }
 
 @Composable
 private fun Screen(
     status: Status,
-    onOverlay: () -> Unit,
+    onAccessibility: () -> Unit,
     onListener: () -> Unit,
-    onNotifications: () -> Unit,
-    onBattery: () -> Unit,
+    onUsage: () -> Unit,
+    onOverlay: () -> Unit,
     onAppInfo: () -> Unit,
-    onToggle: () -> Unit,
 ) {
-    val ready = status.overlay && status.listener
     Column(
         Modifier
             .fillMaxSize()
@@ -174,52 +145,76 @@ private fun Screen(
             "What's playing, at your camera cutout.",
             style = TextStyle(color = TextMuted, fontSize = 15.sp),
         )
-        Spacer(Modifier.height(28.dp))
+        Spacer(Modifier.height(24.dp))
 
-        StepCard("Display over other apps", "Lets the island draw above every app.", status.overlay, "Allow", onOverlay)
+        StatusBanner(status.accessibility)
+        Spacer(Modifier.height(20.dp))
+
+        StepCard(
+            "Accessibility service",
+            "Required. Draws the island above the status bar so taps reach it. Open Accessibility, find Dynamic Island under Installed apps, and turn it on.",
+            status.accessibility, "Open", onAccessibility,
+        )
         Spacer(Modifier.height(12.dp))
-        StepCard("Notification access", "Lets the island read what's playing and control it.", status.listener, "Allow", onListener)
+        StepCard(
+            "Notification access",
+            "Required for music. Lets the island read what's playing and control it.",
+            status.listener, "Allow", onListener,
+        )
         Spacer(Modifier.height(12.dp))
-        StepCard("Notifications", "Shows the small \"running\" notification Android requires.", status.notifications, "Allow", onNotifications)
+        StepCard(
+            "Usage access",
+            "Optional. Shows your most-used apps when nothing is playing.",
+            status.usage, "Allow", onUsage,
+        )
         Spacer(Modifier.height(12.dp))
-        StepCard("Keep running in background", "Stops battery saver from closing the island.", status.battery, "Exempt", onBattery)
+        StepCard(
+            "Display over other apps",
+            "Optional. Helps the island open apps from the background on some phones.",
+            status.overlay, "Allow", onOverlay,
+        )
         Spacer(Modifier.height(12.dp))
         StepCard(
             "Switch greyed out or blocked?",
-            "Open App info, tap the three dots at the top right, choose Allow restricted settings, then try the steps above again.",
+            "Open App info, tap the three dots at the top right, choose Allow restricted settings, then try again.",
             false, "App info", onAppInfo,
         )
         Spacer(Modifier.height(12.dp))
         StepCard(
-            "Auto-start (iQOO / Funtouch OS)",
-            "In App info, open Battery or Autostart and allow background activity.",
+            "iQOO / Funtouch OS",
+            "In App info, set Battery to Unrestricted and allow pop-ups while running in the background, so apps can open from the island.",
             false, "App info", onAppInfo,
         )
+    }
+}
 
-        Spacer(Modifier.height(28.dp))
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(28.dp))
-                .background(if (status.running) Surface else if (ready) Accent else Surface)
-                .clickable(enabled = ready || status.running, onClick = onToggle)
-                .padding(vertical = 18.dp),
-            contentAlignment = Alignment.Center,
-        ) {
+@Composable
+private fun StatusBanner(active: Boolean) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(28.dp))
+            .background(if (active) Accent else Surface)
+            .padding(horizontal = 20.dp, vertical = 18.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
             BasicText(
-                if (status.running) "Stop island" else "Start island",
+                if (active) "Island is running" else "Island is off",
                 style = TextStyle(
-                    color = if (status.running) TextPrimary else if (ready) Color.Black else TextMuted,
+                    color = if (active) Color.Black else TextPrimary,
                     fontSize = 17.sp,
                     fontWeight = FontWeight.SemiBold,
                 ),
             )
-        }
-        if (!ready && !status.running) {
-            Spacer(Modifier.height(10.dp))
+            Spacer(Modifier.height(3.dp))
             BasicText(
-                "Allow display over other apps and notification access to start.",
-                style = TextStyle(color = TextMuted, fontSize = 13.sp),
+                if (active) {
+                    "Play music, or tap the island with nothing playing. To stop it, turn the service off in Accessibility."
+                } else {
+                    "Turn on the accessibility service below to start."
+                },
+                style = TextStyle(color = if (active) Color(0xFF1B2433) else TextMuted, fontSize = 13.sp),
             )
         }
     }

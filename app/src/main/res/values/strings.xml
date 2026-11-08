@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">Dynamic Island</string>
+    <string name="accessibility_description">Lets Dynamic Island draw above the status bar so it can be tapped. It does not read or record your screen.</string>
 </resources>
