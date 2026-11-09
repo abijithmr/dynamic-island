@@ -36,6 +36,7 @@ object IslandSpec {
     const val EXPANDED_W_DP = 360f
     const val MUSIC_H_DP = 190f
     const val APPS_H_DP = 224f
+    const val TOP_OFFSET_DP = 8f
     const val PAD_DP = 10f
 
     /** Touch area around the idle pill. The camera hole is tiny, so the target is much bigger. */
@@ -76,11 +77,13 @@ private class OverlayFrame(
  * The window is only resized at the two endpoints (collapsed / expanded). All motion between
  * them happens inside Compose, so no WindowManager layout happens while animating.
  */
-class IslandOverlay(private val service: AccessibilityService, tracker: AppTracker) {
+class IslandOverlay(
+    private val service: AccessibilityService,
+    private val tracker: AppTracker,
+) {
     private val windowManager: WindowManager = service.getSystemService(WindowManager::class.java)
     private val owner = OverlayOwner()
     private val repo = MediaRepository(service)
-    private val tracker = AppUsageTracker(service)
     private val appsRepo = FrequentApps(service, tracker)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
