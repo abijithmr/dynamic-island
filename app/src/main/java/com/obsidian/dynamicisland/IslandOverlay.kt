@@ -1,19 +1,23 @@
 package com.obsidian.dynamicisland
 
 import android.accessibilityservice.AccessibilityService
+import android.app.Notification
+import android.content.Context
 import android.content.Intent
 import android.content.res.Configuration
 import android.graphics.PixelFormat
-import android.provider.Settings
+import android.media.session.MediaSession
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
+import android.view.accessibility.AccessibilityEvent
 import android.widget.FrameLayout
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.platform.ComposeView
+import androidx.core.os.BundleCompat
 import androidx.lifecycle.setViewTreeLifecycleOwner
 import androidx.lifecycle.setViewTreeViewModelStoreOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
@@ -33,6 +37,10 @@ object IslandSpec {
     const val MUSIC_H_DP = 190f
     const val APPS_H_DP = 224f
     const val PAD_DP = 10f
+
+    /** Touch area around the idle pill. The camera hole is tiny, so the target is much bigger. */
+    const val IDLE_TOUCH_W_DP = 150f
+    const val IDLE_TOUCH_EXTRA_H_DP = 14f
 }
 
 /** Size and position of the pill, derived from the camera cutout. */
@@ -40,6 +48,7 @@ data class IslandGeometry(
     val compactWidthDp: Float,
     val idleWidthDp: Float,
     val compactHeightDp: Float,
+    val idleHeightDp: Float,
     val expandedWidthDp: Float,
     val yPx: Int,
 )
@@ -48,11 +57,10 @@ class IslandActions(
     val expand: () -> Unit,
     val collapse: () -> Unit,
     val launch: (String) -> Unit,
-    val grantUsage: () -> Unit,
 )
 
 private class OverlayFrame(
-    context: android.content.Context,
+    context: Context,
     private val onOutside: () -> Unit,
 ) : FrameLayout(context) {
     override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
@@ -68,11 +76,12 @@ private class OverlayFrame(
  * The window is only resized at the two endpoints (collapsed / expanded). All motion between
  * them happens inside Compose, so no WindowManager layout happens while animating.
  */
-class IslandOverlay(private val service: AccessibilityService) {
+class IslandOverlay(private val service: AccessibilityService, tracker: AppTracker) {
     private val windowManager: WindowManager = service.getSystemService(WindowManager::class.java)
     private val owner = OverlayOwner()
     private val repo = MediaRepository(service)
-    private val appsRepo = FrequentApps(service)
+    private val tracker = AppUsageTracker(service)
+    private val appsRepo = FrequentApps(service, tracker)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     private val uiExpanded = MutableStateFlow(false)
@@ -90,13 +99,10 @@ class IslandOverlay(private val service: AccessibilityService) {
         expand = ::requestExpand,
         collapse = ::requestCollapse,
         launch = ::launchApp,
-        grantUsage = ::openUsageSettings,
     )
 
     fun show() {
         owner.create()
-        repo.start()
-        MediaListenerService.onConnected = { repo.restart() }
 
         // A paused session is kept for 30 s, then the island goes back to idle (frequent apps).
         scope.launch {
@@ -108,7 +114,7 @@ class IslandOverlay(private val service: AccessibilityService) {
                 }
             }
         }
-        // Idle needs a smaller window than music so it doesn't steal status-bar touches.
+        // Idle needs a different window size than music.
         scope.launch {
             nowPlaying.collectLatest { if (!windowExpanded && frame != null) setWindow(false) }
         }
@@ -117,12 +123,30 @@ class IslandOverlay(private val service: AccessibilityService) {
     }
 
     fun hide() {
-        MediaListenerService.onConnected = null
         scope.cancel()
         frame?.let { runCatching { windowManager.removeView(it) } }
         frame = null
         repo.stop()
         owner.destroy()
+    }
+
+    /** Fed by the accessibility service. */
+    fun onEvent(event: AccessibilityEvent) {
+        when (event.eventType) {
+            AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED -> {
+                val notification = event.parcelableData as? Notification ?: return
+                val token = BundleCompat.getParcelable(
+                    notification.extras,
+                    Notification.EXTRA_MEDIA_SESSION,
+                    MediaSession.Token::class.java,
+                ) ?: return
+                repo.onSessionToken(token)
+            }
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
+                val pkg = event.packageName?.toString() ?: return
+                tracker.onForeground(pkg)
+            }
+        }
     }
 
     fun onConfigurationChanged(newConfig: Configuration) {
@@ -164,10 +188,6 @@ class IslandOverlay(private val service: AccessibilityService) {
 
     private fun loadApps() {
         scope.launch {
-            if (!UsageAccess.isGranted(service)) {
-                apps.value = AppsUi.NoAccess
-                return@launch
-            }
             if (apps.value !is AppsUi.Ready) apps.value = AppsUi.Loading
             apps.value = AppsUi.Ready(appsRepo.load())
         }
@@ -177,13 +197,6 @@ class IslandOverlay(private val service: AccessibilityService) {
         val intent = service.packageManager.getLaunchIntentForPackage(packageName)
             ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) ?: return
         runCatching { service.startActivity(intent) }
-        requestCollapse()
-    }
-
-    private fun openUsageSettings() {
-        runCatching {
-            service.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-        }
         requestCollapse()
     }
 
@@ -249,12 +262,15 @@ class IslandOverlay(private val service: AccessibilityService) {
 
     private fun collapsedSize(): Pair<Int, Int> {
         val g = geometry.value
-        val w = if (nowPlaying.value != null) g.compactWidthDp else g.idleWidthDp
-        return px(w + 2 * IslandSpec.PAD_DP) to px(g.compactHeightDp + IslandSpec.PAD_DP)
+        val playing = nowPlaying.value != null
+        val widthDp = if (playing) g.compactWidthDp else maxOf(g.idleWidthDp, IslandSpec.IDLE_TOUCH_W_DP)
+        val extraH = if (playing) IslandSpec.PAD_DP else IslandSpec.IDLE_TOUCH_EXTRA_H_DP
+        return px(widthDp + 2 * IslandSpec.PAD_DP) to px(g.compactHeightDp + extraH)
     }
 
     private fun expandedSize(): Pair<Int, Int> =
-        px(geometry.value.expandedWidthDp + 2 * IslandSpec.PAD_DP) to px(IslandSpec.APPS_H_DP + IslandSpec.PAD_DP)
+        px(geometry.value.expandedWidthDp + 2 * IslandSpec.PAD_DP) to
+            px(IslandSpec.APPS_H_DP + IslandSpec.PAD_DP + IslandSpec.TOP_OFFSET_DP)
 
     private fun computeGeometry(): IslandGeometry {
         val density = service.resources.displayMetrics.density
@@ -266,9 +282,17 @@ class IslandOverlay(private val service: AccessibilityService) {
             val cutoutWdp = rect.width() / density
             val heightDp = (rect.height() / density + 10f).coerceIn(32f, 44f)
             val y = (rect.exactCenterY() - heightDp * density / 2f).toInt().coerceAtLeast(0)
-            IslandGeometry(cutoutWdp + 2f * (heightDp + 8f), cutoutWdp + 14f, heightDp, expandedW, y)
+            // Idle pill hugs the camera hole so it is hard to spot; the music pill is wider.
+            IslandGeometry(
+                cutoutWdp + 2f * (heightDp + 8f),
+                cutoutWdp + 4f,
+                heightDp,
+                rect.height() / density + 2f,
+                expandedW,
+                y,
+            )
         } else {
-            IslandGeometry(118f, 64f, 34f, expandedW, (8 * density).toInt())
+            IslandGeometry(118f, 40f, 34f, 24f, expandedW, (8 * density).toInt())
         }
     }
 

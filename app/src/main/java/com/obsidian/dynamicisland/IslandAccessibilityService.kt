@@ -6,20 +6,26 @@ import android.content.res.Configuration
 import android.view.accessibility.AccessibilityEvent
 
 /**
- * The accessibility service is only used as a window host: its overlay type draws above the
- * status bar and receives touches there. It does not read the screen.
+ * The accessibility service is the only permission the island needs. It hosts the overlay
+ * window (which sits above the status bar, so taps at the cutout reach it) and notices which
+ * app comes to the front so the island can show your most-used apps. It never reads screen text.
  */
 class IslandAccessibilityService : AccessibilityService() {
+    private val tracker by lazy { AppTracker(this) }
     private var overlay: IslandOverlay? = null
 
     override fun onServiceConnected() {
         super.onServiceConnected()
         running = true
         overlay?.hide()
-        overlay = IslandOverlay(this).also { it.show() }
+        overlay = IslandOverlay(this, tracker).also { it.show() }
     }
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) = Unit
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        if (event?.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            event.packageName?.toString()?.let(tracker::onForeground)
+        }
+    }
 
     override fun onInterrupt() = Unit
 

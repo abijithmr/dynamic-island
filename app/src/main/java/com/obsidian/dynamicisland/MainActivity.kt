@@ -46,12 +46,7 @@ private val Accent = Color(0xFF8FB4FF)
 private val TextPrimary = Color(0xFFECEEF2)
 private val TextMuted = Color(0xFF8D93A0)
 
-private data class Status(
-    val accessibility: Boolean,
-    val listener: Boolean,
-    val usage: Boolean,
-    val overlay: Boolean,
-)
+private data class Status(val accessibility: Boolean, val music: Boolean)
 
 class MainActivity : ComponentActivity() {
     private val refresh = mutableIntStateOf(0)
@@ -65,9 +60,7 @@ class MainActivity : ComponentActivity() {
             Screen(
                 status = status,
                 onAccessibility = { open(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) },
-                onListener = { openListenerSettings() },
-                onUsage = { open(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)) },
-                onOverlay = { openOverlaySettings() },
+                onMusic = { openListenerSettings() },
                 onAppInfo = { openAppInfo() },
             )
         }
@@ -82,14 +75,6 @@ class MainActivity : ComponentActivity() {
 
     private fun openAppInfo() {
         open(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
-    }
-
-    private fun openOverlaySettings() {
-        if (!open(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))) &&
-            !open(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION))
-        ) {
-            openAppInfo()
-        }
     }
 
     private fun openListenerSettings() {
@@ -113,9 +98,7 @@ private fun readStatus(context: Context): Status {
     }
     return Status(
         accessibility = accessibility,
-        listener = NotificationManagerCompat.getEnabledListenerPackages(context).contains(context.packageName),
-        usage = UsageAccess.isGranted(context),
-        overlay = Settings.canDrawOverlays(context),
+        music = NotificationManagerCompat.getEnabledListenerPackages(context).contains(context.packageName),
     )
 }
 
@@ -123,9 +106,7 @@ private fun readStatus(context: Context): Status {
 private fun Screen(
     status: Status,
     onAccessibility: () -> Unit,
-    onListener: () -> Unit,
-    onUsage: () -> Unit,
-    onOverlay: () -> Unit,
+    onMusic: () -> Unit,
     onAppInfo: () -> Unit,
 ) {
     Column(
@@ -142,36 +123,24 @@ private fun Screen(
         )
         Spacer(Modifier.height(6.dp))
         BasicText(
-            "What's playing, at your camera cutout.",
+            "A tappable island at your camera cutout.",
             style = TextStyle(color = TextMuted, fontSize = 15.sp),
         )
         Spacer(Modifier.height(24.dp))
 
-        StatusBanner(status.accessibility)
+        StatusBanner(status)
         Spacer(Modifier.height(20.dp))
 
         StepCard(
             "Accessibility service",
-            "Required. Draws the island above the status bar so taps reach it. Open Accessibility, find Dynamic Island under Installed apps, and turn it on.",
+            "The only permission needed. Open Accessibility, find Dynamic Island under Installed apps, and turn it on. With nothing playing, tap the island to see your frequent apps.",
             status.accessibility, "Open", onAccessibility,
         )
         Spacer(Modifier.height(12.dp))
         StepCard(
-            "Notification access",
-            "Required for music. Lets the island read what's playing and control it.",
-            status.listener, "Allow", onListener,
-        )
-        Spacer(Modifier.height(12.dp))
-        StepCard(
-            "Usage access",
-            "Optional. Shows your most-used apps when nothing is playing.",
-            status.usage, "Allow", onUsage,
-        )
-        Spacer(Modifier.height(12.dp))
-        StepCard(
-            "Display over other apps",
-            "Optional. Helps the island open apps from the background on some phones.",
-            status.overlay, "Allow", onOverlay,
+            "Music (optional)",
+            "Android only shares track info and controls through notification access. Turn it on to see and control what's playing.",
+            status.music, "Allow", onMusic,
         )
         Spacer(Modifier.height(12.dp))
         StepCard(
@@ -182,14 +151,15 @@ private fun Screen(
         Spacer(Modifier.height(12.dp))
         StepCard(
             "iQOO / Funtouch OS",
-            "In App info, set Battery to Unrestricted and allow pop-ups while running in the background, so apps can open from the island.",
+            "If apps won't open from the island, set Battery to Unrestricted in App info and allow background pop-ups.",
             false, "App info", onAppInfo,
         )
     }
 }
 
 @Composable
-private fun StatusBanner(active: Boolean) {
+private fun StatusBanner(status: Status) {
+    val active = status.accessibility
     Row(
         Modifier
             .fillMaxWidth()
@@ -209,10 +179,10 @@ private fun StatusBanner(active: Boolean) {
             )
             Spacer(Modifier.height(3.dp))
             BasicText(
-                if (active) {
-                    "Play music, or tap the island with nothing playing. To stop it, turn the service off in Accessibility."
-                } else {
-                    "Turn on the accessibility service below to start."
+                when {
+                    !active -> "Turn on the accessibility service below to start."
+                    status.music -> "Play music, or tap the island with nothing playing. To stop it, turn the service off in Accessibility."
+                    else -> "Tap the island for your frequent apps. Turn on Music below to also show what's playing."
                 },
                 style = TextStyle(color = if (active) Color(0xFF1B2433) else TextMuted, fontSize = 13.sp),
             )

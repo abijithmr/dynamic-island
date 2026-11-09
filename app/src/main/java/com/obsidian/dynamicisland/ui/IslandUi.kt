@@ -21,6 +21,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -144,16 +145,22 @@ fun IslandRoot(
     }
     val height = t.animateDp({ morph() }, label = "h") { m ->
         when (m) {
-            Mode.Idle, Mode.Music -> geo.compactHeightDp.dp
+            Mode.Idle -> geo.idleHeightDp.dp
+            Mode.Music -> geo.compactHeightDp.dp
             Mode.MusicOpen -> IslandSpec.MUSIC_H_DP.dp
             Mode.AppsOpen -> IslandSpec.APPS_H_DP.dp
         }
     }
     val radius = t.animateDp({ morph() }, label = "r") { m ->
         when (m) {
-            Mode.Idle, Mode.Music -> (geo.compactHeightDp / 2f).dp
+            Mode.Idle -> (geo.idleHeightDp / 2f).dp
+            Mode.Music -> (geo.compactHeightDp / 2f).dp
             else -> 34.dp
         }
+    }
+    // The open panel floats a few dp below the top edge instead of touching it.
+    val topOffset = t.animateDp({ morph() }, label = "top") { m ->
+        if (m == Mode.MusicOpen || m == Mode.AppsOpen) IslandSpec.TOP_OFFSET_DP.dp else 0.dp
     }
     val compactAlpha = t.contentAlpha(Mode.Music)
     val musicAlpha = t.contentAlpha(Mode.MusicOpen)
@@ -169,6 +176,17 @@ fun IslandRoot(
     Box(
         Modifier
             .fillMaxSize()
+            .pointerInput(expanded) {
+                if (expanded) {
+                    var dy = 0f
+                    detectVerticalDragGestures(
+                        onDragStart = { dy = 0f },
+                        onDragEnd = { if (dy < -40f) actions.collapse() },
+                        onDragCancel = { dy = 0f },
+                        onVerticalDrag = { _, delta -> dy += delta },
+                    )
+                }
+            }
             .pointerInput(expanded, np) {
                 detectTapGestures(
                     onPress = {
@@ -192,8 +210,9 @@ fun IslandRoot(
                 .layout { measurable, _ ->
                     val w = width.value.roundToPx()
                     val h = height.value.roundToPx()
+                    val off = topOffset.value.roundToPx()
                     val placeable = measurable.measure(Constraints.fixed(w, h))
-                    layout(w, h) { placeable.place(0, 0) }
+                    layout(w, h + off) { placeable.place(0, off) }
                 }
                 .graphicsLayer {
                     shape = RoundedCornerShape(radius.value.toPx())
@@ -223,7 +242,6 @@ fun IslandRoot(
                     apps, geo,
                     Modifier.align(Alignment.TopCenter).graphicsLayer { alpha = appsAlpha.value },
                     onLaunch = actions.launch,
-                    onGrantUsage = actions.grantUsage,
                 )
             }
         }
@@ -332,45 +350,23 @@ private fun AppsPanel(
     geo: IslandGeometry,
     modifier: Modifier,
     onLaunch: (String) -> Unit,
-    onGrantUsage: () -> Unit,
 ) {
+    val title = if (apps is AppsUi.Ready && apps.personalised) "Frequent apps" else "Apps"
     Column(
         modifier
             .requiredSize(geo.expandedWidthDp.dp, IslandSpec.APPS_H_DP.dp)
             .padding(horizontal = 20.dp, vertical = 16.dp),
     ) {
         BasicText(
-            "Frequent apps",
+            title,
             style = TextStyle(color = Color.White.copy(alpha = 0.55f), fontSize = 13.sp, fontWeight = FontWeight.Medium),
         )
         Spacer(Modifier.height(10.dp))
         when (apps) {
             AppsUi.Loading -> Hint("Loading…")
-            AppsUi.NoAccess -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    BasicText(
-                        "Allow usage access to see the apps you use most.",
-                        style = TextStyle(color = Color.White.copy(alpha = 0.7f), fontSize = 14.sp, textAlign = TextAlign.Center),
-                    )
-                    Spacer(Modifier.height(14.dp))
-                    Box(
-                        Modifier
-                            .clip(CircleShape)
-                            .background(Color.White)
-                            .clickable(
-                                interactionSource = remember { MutableInteractionSource() },
-                                indication = null,
-                                onClick = onGrantUsage,
-                            )
-                            .padding(horizontal = 18.dp, vertical = 10.dp),
-                    ) {
-                        BasicText("Allow", style = TextStyle(color = Color.Black, fontSize = 14.sp, fontWeight = FontWeight.SemiBold))
-                    }
-                }
-            }
             is AppsUi.Ready ->
                 if (apps.apps.isEmpty()) {
-                    Hint("Use your phone a little and your most-used apps will show up here.")
+                    Hint("No apps found.")
                 } else {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         apps.apps.chunked(4).forEach { row ->

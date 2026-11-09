@@ -1,13 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:tools="http://schemas.android.com/tools">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Optional: lets the island open apps from the background on some phones. -->
-    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
-    <!-- Optional: ranks the "frequent apps" panel. Granted by the user in Usage access. -->
-    <uses-permission
-        android:name="android.permission.PACKAGE_USAGE_STATS"
-        tools:ignore="ProtectedPermissions" />
+    <!-- No runtime permissions. The island only needs its accessibility service turned on.
+         Notification access is optional and only adds music. -->
 
     <!-- Needed to resolve launchable apps and the home launcher on Android 11+. -->
     <queries>
