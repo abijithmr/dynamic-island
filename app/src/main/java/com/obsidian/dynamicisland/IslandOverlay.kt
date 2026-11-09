@@ -192,7 +192,7 @@ class IslandOverlay(
     private fun loadApps() {
         scope.launch {
             if (apps.value !is AppsUi.Ready) apps.value = AppsUi.Loading
-            apps.value = AppsUi.Ready(appsRepo.load())
+            apps.value = appsRepo.load()
         }
     }
 
